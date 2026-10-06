@@ -1183,7 +1183,7 @@ fn namespaced_attribute(
     })
 }
 
-fn style_value(style: &str, expected: &str) -> Option<String> {
+pub(crate) fn style_value(style: &str, expected: &str) -> Option<String> {
     style.split(';').find_map(|declaration| {
         let (name, value) = declaration.split_once(':')?;
         name.trim()
@@ -1192,7 +1192,7 @@ fn style_value(style: &str, expected: &str) -> Option<String> {
     })
 }
 
-fn style_number(style: &str, name: &str, suffix: &str) -> Option<f64> {
+pub(crate) fn style_number(style: &str, name: &str, suffix: &str) -> Option<f64> {
     style_value(style, name)?
         .strip_suffix(suffix)?
         .trim()

@@ -111,6 +111,8 @@ pub struct PageGeometry {
     pub margin_left: f64,
     pub header_distance: f64,
     pub footer_distance: f64,
+    /// Whether the body keeps `margin_top` where the header reaches below it, as a negative `w:top` asks.
+    pub top_margin_exact: bool,
     /// Resolved column tracks, left to right.
     ///
     /// **Empty for a single-column section**, which is what keeps that section
@@ -205,6 +207,7 @@ impl Default for PageGeometry {
             margin_left: 72.0,
             header_distance: 36.0,
             footer_distance: 36.0,
+            top_margin_exact: false,
             columns: Vec::new(),
             column_separator: false,
             page_borders: None,
@@ -1237,6 +1240,17 @@ impl<'a> Pager<'a> {
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
+        if !page.top_margin_exact
+            && let Some(header_blocks) = self.page_header_blocks()
+            && !header_blocks.is_empty()
+        {
+            let header_bottom = page.header_distance
+                + header_blocks
+                    .iter()
+                    .map(ParagraphBlock::content_height)
+                    .sum::<f64>();
+            page.margin_top = page.margin_top.max(header_bottom);
+        }
         let shift = page.margin_left - self.section_geometry.margin_left;
         self.tracks = self
             .section_geometry
@@ -1256,10 +1270,23 @@ impl<'a> Pager<'a> {
         self.apply_active_track();
     }
 
+    /// The header Word draws on the page being built.
+    fn page_header_blocks(&self) -> Option<&'a [ParagraphBlock]> {
+        let hf = self.header_footer?;
+        Some(if self.is_first_page && self.title_pg {
+            &hf.first_header_blocks
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            &hf.even_header_blocks
+        } else {
+            &hf.header_blocks
+        })
+    }
+
     /// Narrow the body geometry to the active column track.
     fn apply_active_track(&mut self) {
         let Some(track) = self.tracks.get(self.track_index).copied() else {
             self.geometry = self.page_geometry.clone();
+            self.content_height = self.geometry.content_height();
             self.transpose_body_band();
             return;
         };
@@ -1269,6 +1296,7 @@ impl<'a> Pager<'a> {
             columns: vec![track],
             ..self.page_geometry.clone()
         };
+        self.content_height = self.geometry.content_height();
         self.transpose_body_band();
     }
 
@@ -2163,14 +2191,7 @@ impl<'a> Pager<'a> {
         all_elements.append(&mut self.behind_elements);
 
         if let Some(hf) = self.header_footer {
-            // Choose header blocks: first-page or default
-            let header_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_header_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_header_blocks
-            } else {
-                &hf.header_blocks
-            };
+            let header_blocks = self.page_header_blocks().unwrap_or_default();
             let header_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_header_directions.as_slice()
@@ -3955,13 +3976,12 @@ fn render_paragraph_lines(
                 }
                 LineItem::Group {
                     width,
+                    height,
                     baseline,
                     group,
-                    ..
                 } => {
                     let mut positioned = group.clone();
-                    let group_y =
-                        baseline.map_or(geometry.margin_top + y, |baseline| baseline_y - baseline);
+                    let group_y = baseline_y - baseline.unwrap_or(*height);
                     positioned.transform = positioned.transform.then(oxml_layout::Transform {
                         e: x,
                         f: group_y,
@@ -3995,11 +4015,13 @@ fn render_paragraph_lines(
                             }
                         }
                         LineItem::Group {
-                            baseline, group, ..
+                            height,
+                            baseline,
+                            group,
+                            ..
                         } => {
                             let mut positioned = group.clone();
-                            let group_y = baseline
-                                .map_or(geometry.margin_top + y, |baseline| baseline_y - baseline);
+                            let group_y = baseline_y - baseline.unwrap_or(*height);
                             positioned.transform =
                                 positioned.transform.then(oxml_layout::Transform {
                                     e: x,

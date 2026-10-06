@@ -25,8 +25,8 @@ use rdocx_oxml::shared::ST_HighlightColor;
 use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent, ST_VerticalJc};
 use rdocx_oxml::text::{
-    BookmarkMarker, BreakType, CT_P, CT_R, FieldArgument, FieldInstruction, RunContent,
-    SpecialCharacter, hyperlink_revision_index,
+    BookmarkMarker, BreakType, CT_P, CT_R, FieldArgument, FieldInstruction, LegacyHorizontalRule,
+    RunContent, SpecialCharacter, hyperlink_revision_index,
 };
 
 use crate::block::{
@@ -6605,7 +6605,20 @@ fn layout_paragraph_with_source_and_table(
         let metrics = fm.metrics(font_id, font_size)?;
 
         let content_char_starts = projected_content_char_starts(run);
+        let property_boundary = usize::from(run.properties.is_some());
+        push_legacy_horizontal_rules(
+            &mut inline_items,
+            run,
+            |at| at < property_boundary,
+            available_width,
+        );
         for (content_index, content) in run.content.iter().enumerate() {
+            push_legacy_horizontal_rules(
+                &mut inline_items,
+                run,
+                |at| at == property_boundary + content_index,
+                available_width,
+            );
             let content_char_start = projected_run_start + content_char_starts[content_index];
             match content {
                 RunContent::Text(ct_text) | RunContent::DeletedText(ct_text) => {
@@ -7127,6 +7140,12 @@ fn layout_paragraph_with_source_and_table(
                 RunContent::CommentReference { .. } => {}
             }
         }
+        push_legacy_horizontal_rules(
+            &mut inline_items,
+            run,
+            |at| at >= property_boundary + run.content.len(),
+            available_width,
+        );
     }
 
     let mut equation_rpr =
@@ -7320,6 +7339,64 @@ fn layout_paragraph_with_source_and_table(
         paragraph_mark,
     }));
     Ok(result)
+}
+
+/// Push the legacy horizontal rules a run keeps as raw children at the boundaries `at` accepts.
+fn push_legacy_horizontal_rules(
+    inline_items: &mut Vec<InlineItem>,
+    run: &CT_R,
+    at: impl Fn(usize) -> bool,
+    measure: f64,
+) {
+    if run.extra_xml_positions.len() != run.extra_xml.len() {
+        return;
+    }
+    for (position, raw) in run.extra_xml_positions.iter().zip(&run.extra_xml) {
+        if CT_R::raw_child_is_legacy_horizontal_rule(*position)
+            && at(CT_R::raw_child_position(*position))
+            && let Some(item) = LegacyHorizontalRule::from_raw_xml(raw)
+                .and_then(|rule| legacy_horizontal_rule_item(&rule, measure))
+        {
+            inline_items.push(item);
+        }
+    }
+}
+
+/// A legacy horizontal rule as a group the width of the measure, the rule placed in it by `o:hralign`.
+fn legacy_horizontal_rule_item(rule: &LegacyHorizontalRule, measure: f64) -> Option<InlineItem> {
+    let height = rule
+        .height
+        .filter(|height| height.is_finite() && *height > 0.0)?;
+    let width = match (rule.width_tenths_percent, rule.width) {
+        (Some(tenths), _) if tenths > 0.0 => measure * (tenths / 1000.0).min(1.0),
+        (_, Some(width)) if width > 0.0 => width.min(measure),
+        _ => measure,
+    };
+    let x = match rule.align.as_deref() {
+        Some("center") => (measure - width) / 2.0,
+        Some("right") => measure - width,
+        _ => 0.0,
+    };
+    Some(InlineItem::Group {
+        width: measure,
+        height,
+        baseline: None,
+        group: GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children: vec![PositionedElement::FilledRect {
+                rect: Rect {
+                    x,
+                    y: 0.0,
+                    width,
+                    height,
+                },
+                color: Color::from_hex(rule.color.as_deref().unwrap_or("A0A0A0")),
+            }],
+        },
+    })
 }
 
 fn push_targeted_bookmark_markers(
@@ -8101,12 +8178,13 @@ fn sect_pr_to_geometry(sect_pr: &CT_SectPr) -> PageGeometry {
     let geometry = PageGeometry {
         page_width: sect_pr.page_width.map(|t| t.to_pt()).unwrap_or(612.0),
         page_height: sect_pr.page_height.map(|t| t.to_pt()).unwrap_or(792.0),
-        margin_top: sect_pr.margin_top.map(|t| t.to_pt()).unwrap_or(72.0),
+        margin_top: sect_pr.margin_top.map(|t| t.to_pt().abs()).unwrap_or(72.0),
         margin_right: sect_pr.margin_right.map(|t| t.to_pt()).unwrap_or(72.0),
         margin_bottom: sect_pr.margin_bottom.map(|t| t.to_pt()).unwrap_or(72.0),
         margin_left: sect_pr.margin_left.map(|t| t.to_pt()).unwrap_or(72.0),
         header_distance: sect_pr.header_distance.map(|t| t.to_pt()).unwrap_or(36.0),
         footer_distance: sect_pr.footer_distance.map(|t| t.to_pt()).unwrap_or(36.0),
+        top_margin_exact: sect_pr.margin_top.is_some_and(|t| t.0 < 0),
         columns: Vec::new(),
         column_separator: false,
         page_borders: sect_pr_page_borders(sect_pr),

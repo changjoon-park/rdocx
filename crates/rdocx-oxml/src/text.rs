@@ -12,6 +12,7 @@ use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 use crate::content_control::{CT_Sdt, SdtContent, SdtOwner};
 use crate::drawing::CT_Drawing;
 use crate::error::{OxmlError, Result};
+use crate::header_footer::style_number;
 use crate::math::OfficeMath;
 use crate::namespace::{R_NS, matches_local_name};
 use crate::numbering::{namespace_bindings, parse_scoped_ppr, word_prefixes_at};
@@ -1485,6 +1486,65 @@ fn is_legacy_horizontal_rule(raw_xml: &[u8], inherited_namespaces: &[(String, St
             _ => return false,
         }
         buffer.clear();
+    }
+}
+
+/// What a legacy VML horizontal rule draws, read from its `v:rect`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyHorizontalRule {
+    /// Thickness in points.
+    pub height: Option<f64>,
+    /// Length in points, when the rect's style gives one.
+    pub width: Option<f64>,
+    /// Length in tenths of a percent of the text measure (`o:hrpct`).
+    pub width_tenths_percent: Option<f64>,
+    /// Fill colour as hex digits without `#`.
+    pub color: Option<String>,
+    /// `o:hralign`: `left`, `center` or `right`.
+    pub align: Option<String>,
+}
+
+impl LegacyHorizontalRule {
+    /// Read a raw run child that the parser flagged as a legacy horizontal rule.
+    pub fn from_raw_xml(raw_xml: &[u8]) -> Option<Self> {
+        let mut reader = Reader::from_reader(raw_xml);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer).ok()? {
+                Event::Start(element) | Event::Empty(element)
+                    if element.local_name().as_ref() == b"rect" =>
+                {
+                    let attribute = |name: &[u8]| {
+                        element.attributes().flatten().find_map(|attribute| {
+                            (attribute.key.local_name().as_ref() == name)
+                                .then(|| {
+                                    attribute
+                                        .decoded_and_normalized_value(
+                                            XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .ok()
+                                        .map(Cow::into_owned)
+                                })
+                                .flatten()
+                        })
+                    };
+                    let style = attribute(b"style").unwrap_or_default();
+                    return Some(Self {
+                        height: style_number(&style, "height", "pt"),
+                        width: style_number(&style, "width", "pt"),
+                        width_tenths_percent: attribute(b"hrpct")
+                            .and_then(|value| value.trim().parse().ok()),
+                        color: attribute(b"fillcolor")
+                            .map(|value| value.trim_start_matches('#').to_owned()),
+                        align: attribute(b"hralign"),
+                    });
+                }
+                Event::Eof => return None,
+                _ => {}
+            }
+            buffer.clear();
+        }
     }
 }
 
