@@ -113,6 +113,8 @@ pub struct PageGeometry {
     pub footer_distance: f64,
     /// Whether the body keeps `margin_top` where the header reaches below it, as a negative `w:top` asks.
     pub top_margin_exact: bool,
+    /// Whether the body keeps `margin_bottom` where the footer reaches above it, as a negative `w:bottom` asks.
+    pub bottom_margin_exact: bool,
     /// Resolved column tracks, left to right.
     ///
     /// **Empty for a single-column section**, which is what keeps that section
@@ -208,6 +210,7 @@ impl Default for PageGeometry {
             header_distance: 36.0,
             footer_distance: 36.0,
             top_margin_exact: false,
+            bottom_margin_exact: false,
             columns: Vec::new(),
             column_separator: false,
             page_borders: None,
@@ -1251,6 +1254,17 @@ impl<'a> Pager<'a> {
                     .sum::<f64>();
             page.margin_top = page.margin_top.max(header_bottom);
         }
+        if !page.bottom_margin_exact
+            && let Some(footer_blocks) = self.page_footer_blocks()
+            && !footer_blocks.is_empty()
+        {
+            let footer_reach = page.footer_distance
+                + footer_blocks
+                    .iter()
+                    .map(ParagraphBlock::content_height)
+                    .sum::<f64>();
+            page.margin_bottom = page.margin_bottom.max(footer_reach);
+        }
         let shift = page.margin_left - self.section_geometry.margin_left;
         self.tracks = self
             .section_geometry
@@ -1279,6 +1293,18 @@ impl<'a> Pager<'a> {
             &hf.even_header_blocks
         } else {
             &hf.header_blocks
+        })
+    }
+
+    /// The footer Word draws on the page being built.
+    fn page_footer_blocks(&self) -> Option<&'a [ParagraphBlock]> {
+        let hf = self.header_footer?;
+        Some(if self.is_first_page && self.title_pg {
+            &hf.first_footer_blocks
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            &hf.even_footer_blocks
+        } else {
+            &hf.footer_blocks
         })
     }
 
@@ -2219,14 +2245,7 @@ impl<'a> Pager<'a> {
         all_elements.append(&mut self.elements);
 
         if let Some(hf) = self.header_footer {
-            // Choose footer blocks: first-page or default
-            let footer_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_footer_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_footer_blocks
-            } else {
-                &hf.footer_blocks
-            };
+            let footer_blocks = self.page_footer_blocks().unwrap_or_default();
             let footer_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_footer_directions.as_slice()
